@@ -2,13 +2,15 @@
 #![deny(clippy::all)]
 #![forbid(unsafe_code)]
 
+use agent::Agent;
+mod agent;
 use std::time::Duration;
+use std::vec;
 
 use error_iter::ErrorIter as _;
 use game_loop::{game_loop, Time, TimeTrait as _};
 use log::error;
 use pixels::{Error, Pixels, SurfaceTexture};
-use rand::seq::SliceRandom;
 use rand::Rng;
 use winit::dpi::LogicalSize;
 use winit::event::VirtualKeyCode;
@@ -18,25 +20,17 @@ use winit_input_helper::WinitInputHelper;
 
 const SCREEN_WIDTH: u32 = 800;
 const SCREEN_HEIGHT: u32 = 900;
-const CELLS_WIDTH: i16 = 300;
-const CELLS_HEIGHT: i16 = 300;
+const CELLS_WIDTH: usize = 300;
+const CELLS_HEIGHT: usize = 300;
 const CELLS_X: usize = 100;
 const CELLS_Y: usize = 200;
 const SCALE: f32 = 2.0;
-const SPAWN_RATE: f32 = 0.1;
-const SURVIVAL_RATE: f32 = 0.99;
 const FPS: f64 = 20.0;
+
+
 pub const TIME_STEP: Duration = Duration::from_nanos(1_000_000_000 / FPS as u64);
 
 /// Representation of the application state. In this example, a box will bounce around the screen.
-struct World {
-    density: f32,
-    width: i16,
-    height: i16,
-    scale: f32,
-    zoom: i16,
-    tiles: Vec<Vec<Cell>>,
-}
 
 fn main() -> Result<(), Error> {
     env_logger::init();
@@ -45,9 +39,9 @@ fn main() -> Result<(), Error> {
     let window = {
         let size = LogicalSize::new(SCREEN_WIDTH as f64, SCREEN_HEIGHT as f64);
         WindowBuilder::new()
-            .with_title("Z Life")
+            .with_title("Z Slime")
+            .with_resizable(false)
             .with_inner_size(size)
-            .with_min_inner_size(size)
             .build(&event_loop)
             .unwrap()
     };
@@ -84,7 +78,7 @@ fn main() -> Result<(), Error> {
         0.1,
         move |g| {
             // Update the world
-            g.game.world.update_life();
+            g.game.world.update();
         },
         move |g| {
             // Drawing
@@ -114,42 +108,6 @@ fn main() -> Result<(), Error> {
                     g.exit();
                     return;
                 }
-                if g.game.input.key_pressed(VirtualKeyCode::Left) {
-                    g.game.world.update_seed();
-                    return;
-                }
-
-                if g.game.input.key_pressed(VirtualKeyCode::Up) {
-                    g.game.world.density += 0.02;
-                    g.game.world.update_seed();
-                    return;
-                }
-
-                if g.game.input.key_pressed(VirtualKeyCode::Down) {
-                    g.game.world.density -= 0.02;
-                    g.game.world.update_seed();
-                    return;
-                }
-
-                if g.game.input.key_pressed(VirtualKeyCode::Right) {
-                    g.game.world.update_map_iteration();
-                    return;
-                }
-
-                if g.game.input.key_pressed(VirtualKeyCode::Z) {
-                    g.game.world.zoom += 1;
-                    g.game.world.update_seed();
-                    return;
-                }
-
-                if g.game.input.key_pressed(VirtualKeyCode::X) {
-                    if g.game.world.zoom > 1 {
-                        g.game.world.zoom -= 1;
-                        g.game.world.update_seed();
-                    }
-
-                    return;
-                }
 
                 if g.game.input.mouse_released(0) {
                     let Some((x, y)) = g.game.input.mouse() else { return; };
@@ -168,155 +126,99 @@ fn log_error<E: std::error::Error + 'static>(method_name: &str, err: E) {
     }
 }
 
+struct World {
+    width: usize,
+    height: usize,
+    draw_scale: f32,
+    tiles: Vec<Cell>,
+    agents: Vec<Agent>,
+}
+
 impl World {
     /// Create a new `World` instance that can draw a moving box.
     fn new() -> Self {
         Self {
-            density: 0.4,
             width: CELLS_WIDTH,
             height: CELLS_HEIGHT,
-            scale: SCALE,
-            zoom: 1,
-            tiles: vec![
-                vec![Cell::Empty; CELLS_HEIGHT.try_into().unwrap()];
-                CELLS_WIDTH.try_into().unwrap()
-            ],
+            draw_scale: SCALE,
+            tiles: vec![Cell::Empty; CELLS_WIDTH.checked_mul(CELLS_HEIGHT).expect("overflow")],
+            agents: Vec::new(),
         }
     }
 
-    fn mouse_action(&mut self, x: i16, y: i16) {
-        let cells_pixel_width = (CELLS_WIDTH as f32 * self.scale) as i16;
-        let cells_pixel_height = (CELLS_HEIGHT as f32 * self.scale) as i16;
+    fn mouse_inside_world(&self, x: i16, y: i16) -> bool {
+        let cells_pixel_width = (CELLS_WIDTH as f32 * self.draw_scale) as i16;
+        let cells_pixel_height = (CELLS_HEIGHT as f32 * self.draw_scale) as i16;
         let inside_cells = x > CELLS_X.try_into().unwrap()
             && x < CELLS_X as i16 + cells_pixel_width
             && y > CELLS_Y.try_into().unwrap()
             && y < CELLS_Y as i16 + cells_pixel_height;
 
+        inside_cells
+    }
+
+    fn mouse_action(&mut self, x: i16, y: i16) {
+        let inside_cells = self.mouse_inside_world(x, y);
         if inside_cells {
-            let row: usize =
-                ((y - CELLS_Y as i16) as f32 / self.scale) as usize % CELLS_HEIGHT as usize;
-            let col: usize =
-                ((x - CELLS_X as i16) as f32 / self.scale) as usize % CELLS_WIDTH as usize;
-            if self.tiles[row][col] == Cell::Wall {
-                return;
-            }
-            self.tiles[row][col] = Cell::Life(
-                rand::thread_rng().gen_range(0..=255),
-                rand::thread_rng().gen_range(0..=255),
-                rand::thread_rng().gen_range(0..=255),
+            let agent = Agent::new(
+                x as f32,
+                y as f32,
+                (random_int(0, 255), random_int(0, 255), random_int(0, 255)),
             );
+            self.agents.push(agent);
         }
     }
 
-    fn update_life(&mut self) {
-        let mut new_tiles = self.tiles.clone();
+    fn update(&mut self) {
+        self.update_agents();
+        self.update_tiles();
+    }
+
+    fn update_agents(&mut self) {
+        for agent in self.agents.iter_mut() {
+            agent.update(self.height, self.width);
+            self.tiles[(agent.x.round() * agent.y.round()) as usize] =
+                Cell::Heat(agent.rgb.0, agent.rgb.1, agent.rgb.2);
+        }
+    }
+
+    fn update_tiles(&mut self) {
+        let mut write_tiles = self.tiles.clone();
         for x in 0..self.width {
             for y in 0..self.height {
-                let mut neighbors = 0;
-                let mut neighbor_list: Vec<Cell> = Vec::new();
-
-                match self.tiles[y as usize][x as usize] {
-                    Cell::Wall => continue,
-                    _ => (),
-                }
-
-                for i in -1..2 {
-                    for j in -1..2 {
-                        if i == 0 && j == 0 {
-                            continue;
-                        }
-                        let x = x + i;
-                        let y = y + j;
-                        if x < 0 || x >= self.width || y < 0 || y >= self.height {
-                            continue;
-                        }
-
-                        match self.tiles[y as usize][x as usize] {
-                            Cell::Life(r, g, b) => {
-                                neighbors += 1;
-                                neighbor_list.push(Cell::Life(r, g, b));
-                            }
-                            _ => (),
-                        }
-                    }
-                }
-                let will_survive = rand::random::<f32>() < SURVIVAL_RATE;
-                let will_spawn = rand::random::<f32>() < SPAWN_RATE;
-                if (neighbors > 5 || neighbors < 3) && !will_survive {
-
-                    // match self.tiles[y as usize][x as usize]{
-                    //     Cell::Life(_, _, _) => new_tiles[y as usize][x as usize] = Cell::Empty,
-                    //     _ => (),
-                    // }
-                } else if neighbors > 0 && will_spawn {
-                    match neighbor_list.choose(&mut rand::thread_rng()) {
-                        Some(Cell::Life(r, g, b)) => {
-                            let (r, g, b) = mutate_life_cell((*r, *g, *b));
-                            new_tiles[y as usize][x as usize] = Cell::Life(r, g, b);
-                        }
-                        _ => (),
-                    }
-                }
+                self.diffuse(x, y, &mut write_tiles)
             }
         }
-        self.tiles = new_tiles;
+        self.tiles = write_tiles;
     }
 
-    /// Update the `World` internal state; bounce the box around the screen.
-    fn update_seed(&mut self) {
-        for x in 0..self.width / self.zoom {
-            for y in 0..self.height / self.zoom {
-                let tile = if rand::random::<f32>() > self.density {
-                    Cell::Empty
-                } else {
-                    Cell::Wall
-                };
+    fn diffuse(&mut self, x: usize, y: usize, write_tiles: &mut Vec<Cell>) {
+        let idx = x + y * self.width;
+        let mut r_sum = 0;
+        let mut g_sum = 0;
+        let mut b_sum = 0;
+        match self.tiles[idx] {
+            Cell::Empty => {}
+            Cell::Heat(cr, cg, cb) => {
+                r_sum += cr;
+                g_sum += cg;
+                b_sum += cb;
+            }
+        }
 
-                for i in 0..self.zoom {
-                    for j in 0..self.zoom {
-                        self.tiles[(y * self.zoom + j) as usize][(x * self.zoom + i) as usize] =
-                            tile;
+        for i in x - 1..x + 1 {
+            for j in y - 1..y + 1 {
+                match self.tiles[i + j * self.width] {
+                    Cell::Empty => {}
+                    Cell::Heat(r, g, b) => {
+                        r_sum += r;
+                        g_sum += g;
+                        b_sum += b;
                     }
                 }
             }
         }
-    }
-
-    fn update_map_iteration(&mut self) {
-        let mut new_tiles = vec![
-            vec![Cell::Empty; CELLS_HEIGHT.try_into().unwrap()];
-            CELLS_WIDTH.try_into().unwrap()
-        ];
-        for x in 0..self.width {
-            for y in 0..self.height {
-                let mut neighbors = 0;
-                for i in -1..2 {
-                    for j in -1..2 {
-                        if i == 0 && j == 0 {
-                            continue;
-                        }
-                        let x = x + i;
-                        let y = y + j;
-                        if x < 0 || x >= self.width || y < 0 || y >= self.height {
-                            continue;
-                        }
-                        if self.tiles[y as usize][x as usize] == Cell::Empty {
-                            neighbors += 1;
-                        }
-                    }
-                }
-                let mut tile = self.tiles[y as usize][x as usize];
-                if neighbors > 4 {
-                    // empty
-                    tile = Cell::Empty;
-                } else if neighbors < 4 {
-                    // wall
-                    tile = Cell::Wall;
-                }
-                new_tiles[y as usize][x as usize] = tile;
-            }
-        }
-        self.tiles = new_tiles;
+        write_tiles[idx] = Cell::Heat(r_sum / 9, g_sum / 9, b_sum / 9);
     }
 
     /// Draw the `World` state to the frame buffer.
@@ -326,8 +228,8 @@ impl World {
     fn draw(&mut self, frame: &mut [u8]) {
         // clear(frame);
 
-        let cells_pixel_width = (CELLS_WIDTH as f32 * self.scale) as i16;
-        let cells_pixel_height = (CELLS_HEIGHT as f32 * self.scale) as i16;
+        let cells_pixel_width = (CELLS_WIDTH as f32 * self.draw_scale) as i16;
+        let cells_pixel_height = (CELLS_HEIGHT as f32 * self.draw_scale) as i16;
         for (i, pixel) in frame.chunks_exact_mut(4).enumerate() {
             let x = (i % SCREEN_WIDTH as usize) as i16;
             let y = (i / SCREEN_WIDTH as usize) as i16;
@@ -337,16 +239,15 @@ impl World {
                 && y < CELLS_Y as i16 + cells_pixel_height;
 
             let rgba = if inside_cells {
-                let row: usize =
-                    ((y - CELLS_Y as i16) as f32 / self.scale) as usize % CELLS_HEIGHT as usize;
+                let row: usize = ((y - CELLS_Y as i16) as f32 / self.draw_scale) as usize
+                    % CELLS_HEIGHT as usize;
                 let col: usize =
-                    ((x - CELLS_X as i16) as f32 / self.scale) as usize % CELLS_WIDTH as usize;
-                let tile = self.tiles[row][col];
+                    ((x - CELLS_X as i16) as f32 / self.draw_scale) as usize % CELLS_WIDTH as usize;
+                let tile = self.tiles[row * CELLS_WIDTH + col];
 
                 match tile {
                     Cell::Empty => [0xff, 0xff, 0xff, 0xff],
-                    Cell::Wall => [0x00, 0x00, 0x00, 0xff],
-                    Cell::Life(r, g, b) => [
+                    Cell::Heat(r, g, b) => [
                         r.try_into().unwrap(),
                         g.try_into().unwrap(),
                         b.try_into().unwrap(),
@@ -363,35 +264,18 @@ impl World {
     }
 }
 
-fn mutate_life_cell((r, g, b): (i16, i16, i16)) -> (i16, i16, i16) {
+fn random_int(min: u8, max: u8) -> u8 {
     let mut rng = rand::thread_rng();
-
-    let r_mutate = rng.gen_range(-2..3);
-    let g_mutate = rng.gen_range(-2..3);
-    let b_mutate = rng.gen_range(-2..3);
-
-    let r = if r + r_mutate > 0 && r + r_mutate <= 255 {
-        r + r_mutate
-    } else {
-        r
-    };
-    let g = if g + g_mutate > 0 && g + g_mutate <= 255 {
-        g + g_mutate
-    } else {
-        g
-    };
-    let b = if b + b_mutate > 0 && b + b_mutate <= 255 {
-        b + b_mutate
-    } else {
-        b
-    };
-
-    (r, g, b)
+    rng.gen_range(min..max)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Cell {
     Empty,
-    Wall,
-    Life(i16, i16, i16),
+    Heat(u8, u8, u8),
 }
+
+
+
+
+

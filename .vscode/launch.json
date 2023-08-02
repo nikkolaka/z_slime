@@ -6,18 +6,20 @@
     "configurations": [
         
         
+        
+        
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug executable 'z_life2'",
+            "name": "Debug executable 'z_slime'",
             "cargo": {
                 "args": [
                     "build",
-                    "--bin=z_life2",
-                    "--package=z_life2"
+                    "--bin=z_slime",
+                    "--package=z_slime"
                 ],
                 "filter": {
-                    "name": "z_life2",
+                    "name": "z_slime",
                     "kind": "bin"
                 }
             },
@@ -27,16 +29,16 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug unit tests in executable 'z_life2'",
+            "name": "Debug unit tests in executable 'z_slime'",
             "cargo": {
                 "args": [
                     "test",
                     "--no-run",
-                    "--bin=z_life2",
-                    "--package=z_life2"
+                    "--bin=z_slime",
+                    "--package=z_slime"
                 ],
                 "filter": {
-                    "name": "z_life2",
+                    "name": "z_slime",
                     "kind": "bin"
                 }
             },
