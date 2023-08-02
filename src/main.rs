@@ -154,7 +154,7 @@ fn main() -> Result<(), Error> {
                 if g.game.input.mouse_released(0) {
                     let Some((x, y)) = g.game.input.mouse() else { return; };
 
-                    g.game.world.mouse_action(x, y);
+                    g.game.world.mouse_action(x as i16, y as i16);
                 }
             }
         },
@@ -200,7 +200,7 @@ impl World {
             if self.tiles[row][col] == Cell::Wall {
                 return;
             }
-            tiles[row][col] = Cell::Life(
+            self.tiles[row][col] = Cell::Life(
                 rand::thread_rng().gen_range(0..=255),
                 rand::thread_rng().gen_range(0..=255),
                 rand::thread_rng().gen_range(0..=255),
